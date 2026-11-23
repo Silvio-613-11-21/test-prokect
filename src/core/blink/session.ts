@@ -218,12 +218,21 @@ export class EmulatorSession {
     return entries
   }
 
-  /** Регион памяти для дампа: адрес секции данных или .text */
-  memoryWindow(preferredAddress: number, size = 16 * 24): { address: number; bytes: Uint8Array } | null {
-    const aligned = Math.max(0, Math.floor(preferredAddress / 16) * 16)
-    const bytes = this.blink.readVirtual(aligned, size)
-    if (!bytes) return null
-    return { address: aligned, bytes }
+  /**
+   * Регион памяти для дампа.
+   *
+   * Сначала пробуем запрошенный адрес (например, текущий RSP), затем —
+   * секции .data и .text линкера: стек по адресу может быть ещё не
+   * отображён в таблице страниц, а дамп памяти нужен всегда.
+   */
+  memoryWindow(preferredAddress: number, size = 16 * 14): { address: number; bytes: Uint8Array } | null {
+    const candidates = [preferredAddress, 0x402000, 0x401000]
+    for (const candidate of candidates) {
+      const aligned = Math.max(0, Math.floor(candidate / 16) * 16)
+      const bytes = this.blink.readVirtual(aligned, size)
+      if (bytes) return { address: aligned, bytes }
+    }
+    return null
   }
 
   /** Текстовое описание завершения */

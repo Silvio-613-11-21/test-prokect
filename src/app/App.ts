@@ -1,9 +1,21 @@
 /**
  * Корневой контроллер SPA.
  *
- * Собирает рабочую область: панель управления, редактор, док отладчика,
- * панель ограничений. Вся логика обработки (сборка NASM, линковка, исполнение,
- * проверка ограничений) происходит в браузере.
+ * Раскладка повторяет diplom_ / DOSBox Insight:
+ *   ┌──────────────────────────────────────────────┐
+ *   │ заголовок + режим                            │
+ *   ├──────────────────────────────────────────────┤
+ *   │ [Скомпилировать] [Запустить] …   ограничения  │
+ *   ├──────────────────┬───────────────────────────┤
+ *   │ редактор         │ дизассемблер + регистры   │
+ *   │                  │ флаги, память, стек       │
+ *   │                  ├───────────────────────────┤
+ *   │                  │ консоль                   │
+ *   └──────────────────┴───────────────────────────┘
+ *
+ * Никаких селекторов лабораторной/задачи: ограничения приходят
+ * только из ссылки (?lab=N&z=M), а текст задания студент получает
+ * отдельно, поэтому в интерфейсе его нет.
  */
 
 import { CodeEditor } from '../ui/editor/CodeEditor'
@@ -11,16 +23,16 @@ import { DisassemblyPanel } from '../ui/widgets/DisassemblyPanel'
 import { MemoryPanel } from '../ui/widgets/MemoryPanel'
 import { RegistersPanel } from '../ui/widgets/RegistersPanel'
 import { RestrictionPanel } from '../ui/widgets/RestrictionPanel'
+import { FlagsPanel } from '../ui/widgets/FlagsPanel'
 import { StackPanel } from '../ui/widgets/StackPanel'
 import { TerminalPanel } from '../ui/widgets/TerminalPanel'
-import { DebuggerDock } from '../ui/widgets/DebuggerDock'
-import { Splitter } from '../ui/widgets/Splitter'
+import { DebuggerView } from '../ui/widgets/DebuggerView'
 import { Toolbar, type ToolbarState } from '../ui/widgets/Toolbar'
 
 import { EmulatorSession, parseLinkerDiagnostics, parseNasmDiagnostics } from '../core/blink/session'
 import { canExecute, NO_EXECUTION_REASON, type ArchMode } from '../core/asm/modes'
-import { checkRestrictions, getLabLink, getLabTask, getLabTitle, isRegisterAllowed, type LabTask } from '../core/restrictions'
-import { defaultExample, examples, findExample, findExampleForLab } from '../examples'
+import { checkRestrictions, getLabTask, isRegisterAllowed, type LabTask } from '../core/restrictions'
+import { defaultExample, findExample, findExampleForLab } from '../examples'
 import { parseRoute, syncRoute, type RouteState } from './route'
 import { decodeCode, encodeCode } from './share'
 import type { Diagnostic, MachineState } from '../types'
@@ -35,18 +47,21 @@ import linkerUrl from '../assets/gnu-ld.elf?url'
 
 import './app.css'
 
-const THEME_STORAGE_KEY = 'asm-lab:theme'
 const MODE_STORAGE_KEY = 'asm-lab:mode'
+const SPLIT_STORAGE_KEY = 'asm-lab:split'
+
+/** Задержка между инструкциями в режиме «Пошагово (анимация)» */
+const ANIMATION_DELAY = 60
 
 export class App {
   private root: HTMLElement
   private toolbar: Toolbar
   private editor: CodeEditor
-  private dock: DebuggerDock
-  private splitter: Splitter
+  private view: DebuggerView
 
   private disassembly: DisassemblyPanel
   private registers: RegistersPanel
+  private flags: FlagsPanel
   private stack: StackPanel
   private memory: MemoryPanel
   private terminal: TerminalPanel
@@ -56,40 +71,36 @@ export class App {
   private route: RouteState
   private labTask: LabTask | undefined
   private archMode: ArchMode = 'x64'
-  private theme: 'dark' | 'light' = 'dark'
   private machineState: MachineState = 'idle'
   private compiled = false
   private running = false
-  private memoryAddress = 0x402000
-  private lastRip = 0
+  private animating = false
+  private animationTimer: number | null = null
+  private memoryAddress = 0
 
   constructor(root: HTMLElement) {
     this.root = root
     this.route = parseRoute()
     this.archMode = this.route.mode ?? (localStorage.getItem(MODE_STORAGE_KEY) as ArchMode | null) ?? 'x64'
-    this.theme = this.route.theme ?? (localStorage.getItem(THEME_STORAGE_KEY) as 'dark' | 'light' | null) ?? 'dark'
 
-    this.toolbar = new Toolbar(
-      {
-        onCompile: () => void this.compile(),
-        onRun: () => void this.runOrPause(),
-        onStep: () => void this.step(),
-        onReset: () => this.reset(),
-        onStop: () => this.stop(),
-        onModeChange: mode => this.switchMode(mode),
-        onLabChange: (lab, z) => this.setLab(lab, z),
-        onExampleChange: id => this.loadExample(id),
-        onThemeToggle: () => this.toggleTheme(),
-        onShare: () => void this.copyShareLink(),
-        onDownload: () => this.downloadSource(),
-      },
-      examples.map(example => ({ id: example.id, title: example.title })),
-    )
+    this.toolbar = new Toolbar({
+      onCompile: () => void this.compile(),
+      onRun: () => void this.runOrPause(),
+      onAnimate: () => void this.animate(),
+      onStep: () => void this.step(),
+      onReset: () => this.reset(),
+      onStop: () => this.stop(),
+      onModeChange: mode => this.switchMode(mode),
+      onShare: () => void this.copyShareLink(),
+      onDownload: () => this.downloadSource(),
+    })
 
     this.editor = new CodeEditor({
       onChange: () => {
-        this.compiled = false
-        this.machineState = 'idle'
+        if (this.compiled) {
+          this.compiled = false
+          this.machineState = 'idle'
+        }
         this.syncToolbar()
       },
       onCursorChange: (line, column) => this.updateCursor(line, column),
@@ -97,21 +108,12 @@ export class App {
 
     this.disassembly = new DisassemblyPanel()
     this.registers = new RegistersPanel()
+    this.flags = new FlagsPanel()
     this.stack = new StackPanel()
     this.memory = new MemoryPanel()
     this.terminal = new TerminalPanel()
     this.restrictions = new RestrictionPanel()
-
-    this.dock = new DebuggerDock()
-    this.dock.addTab({ id: 'disasm', title: 'Дизассемблер', element: this.disassembly.root })
-    this.dock.addTab({ id: 'registers', title: 'Регистры', element: this.registers.root })
-    this.dock.addTab({ id: 'stack', title: 'Стек', element: this.stack.root })
-    this.dock.addTab({ id: 'memory', title: 'Память', element: this.memory.root })
-    this.dock.addTab({ id: 'console', title: 'Терминал', element: this.terminal.root })
-
-    this.splitter = new Splitter({
-      onChange: ratio => this.root.style.setProperty('--editor-ratio', `${ratio * 100}%`),
-    })
+    this.view = new DebuggerView()
 
     this.session = new EmulatorSession({
       scriptUrl: blinkScriptUrl,
@@ -123,9 +125,7 @@ export class App {
       onStateChange: state => this.onBlinkState(state),
     })
 
-    this.terminal.setInputHandler(line => {
-      this.session.sendInput(line)
-    })
+    this.terminal.setInputHandler(line => this.session.sendInput(line))
 
     // blink отдаёт управление браузеру каждые ~100k циклов: используем это,
     // чтобы обновлять панели прямо во время выполнения программы
@@ -133,11 +133,10 @@ export class App {
 
     this.memory.setAddressHandler(address => {
       this.memoryAddress = address
-      void this.refreshViews(false)
+      void this.refreshViews(false, true)
     })
 
     this.mount()
-    this.applyTheme()
     this.installKeyboardShortcuts()
     void this.bootstrap()
   }
@@ -147,60 +146,118 @@ export class App {
   private mount(): void {
     this.root.classList.add('app')
 
+    const page = document.createElement('div')
+    page.className = 'work-page'
+
+    // Строка управления: кнопки + ограничения
+    const controls = document.createElement('div')
+    controls.className = 'work-page__controls'
+    controls.append(this.toolbar.controls, this.restrictions.root)
+
+    const hint = document.createElement('div')
+    hint.className = 'work-page__hint'
+    hint.innerHTML =
+      '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> — компилировать · ' +
+      '<kbd>F5</kbd> — запустить · <kbd>F10</kbd> — шаг · ' +
+      '<kbd>Shift</kbd>+<kbd>F5</kbd> — сброс'
+
+    // Основная область: редактор слева, отладчик справа
     const workspace = document.createElement('div')
     workspace.className = 'workspace'
 
     const editorPane = document.createElement('section')
-    editorPane.className = 'pane pane--editor'
+    editorPane.className = 'editor-pane'
 
     const editorHeader = document.createElement('header')
-    editorHeader.className = 'pane__header'
+    editorHeader.className = 'editor-pane__header'
 
-    const tabs = document.createElement('div')
-    tabs.className = 'editor-tabs'
-    const tab = document.createElement('span')
-    tab.className = 'editor-tab is-active'
-    tab.textContent = 'main.asm'
-    tabs.appendChild(tab)
+    const fileName = document.createElement('span')
+    fileName.className = 'editor-pane__file'
+    fileName.textContent = 'main.asm'
 
+    const meta = document.createElement('div')
+    meta.className = 'editor-pane__meta'
     const cursor = document.createElement('span')
-    cursor.className = 'pane__meta'
     cursor.dataset.role = 'cursor'
     cursor.textContent = 'Стр 1, Кол 1'
+    const download = document.createElement('button')
+    download.type = 'button'
+    download.className = 'mini'
+    download.title = 'Скачать исходник'
+    download.textContent = '⭳'
+    download.addEventListener('click', () => this.downloadSource())
+    meta.append(cursor, download)
 
-    editorHeader.append(tabs, cursor)
-
-    const hint = document.createElement('div')
-    hint.className = 'editor-hint'
-    hint.innerHTML =
-      '<kbd>Ctrl</kbd>+<kbd>Enter</kbd> — компилировать · ' +
-      '<kbd>F5</kbd> — запустить · <kbd>F10</kbd> — шаг · <kbd>Shift</kbd>+<kbd>F5</kbd> — сброс'
-
-    editorPane.append(editorHeader, this.editor.root, hint)
-
-    const sidePane = document.createElement('aside')
-    sidePane.className = 'pane pane--side'
-    sidePane.appendChild(this.restrictions.root)
-
-    workspace.append(sidePane)
+    editorHeader.append(fileName, meta)
+    editorPane.append(editorHeader, this.editor.root)
 
     const debuggerPane = document.createElement('section')
-    debuggerPane.className = 'pane pane--debugger'
-    debuggerPane.appendChild(this.dock.root)
+    debuggerPane.className = 'debugger-pane'
+    debuggerPane.append(this.toolbar.modeHint, this.view.root)
 
-    const split = document.createElement('div')
-    split.className = 'main-split'
-    split.append(editorPane, debuggerPane)
+    this.view.codeSlot.append(this.disassembly.root)
+    this.view.registersSlot.append(this.registers.root)
+    this.view.flagsSlot.append(this.flags.root)
+    this.view.memorySlot.append(this.memory.root)
+    this.view.stackSlot.append(this.stack.root)
+    this.view.consoleSlot.append(this.terminal.root)
 
-    workspace.insertBefore(split, sidePane)
+    workspace.append(editorPane, debuggerPane)
 
-    this.root.append(this.toolbar.root, workspace)
+    page.append(controls, workspace, hint)
+    this.root.append(this.toolbar.root, page)
 
-    this.splitter.attach(split)
+    // Пропорции колонок редактор/отладчик (перетаскивание за разделитель)
+    const saved = Number.parseFloat(localStorage.getItem(SPLIT_STORAGE_KEY) ?? '0.36')
+    this.applySplit(Number.isFinite(saved) ? saved : 0.36)
+    this.installSplitter(workspace)
 
-    // стартовое значение разделителя
-    const savedRatio = Number.parseFloat(localStorage.getItem('asm-lab:split') ?? '0.52')
-    this.root.style.setProperty('--editor-ratio', `${(Number.isFinite(savedRatio) ? savedRatio : 0.52) * 100}%`)
+    this.applyTheme()
+  }
+
+  private applyTheme(): void {
+    // Тёмная тема по умолчанию и единственная: светлая больше не нужна
+    document.documentElement.dataset.theme = 'dark'
+  }
+
+  private applySplit(ratio: number): void {
+    const clamped = Math.min(0.7, Math.max(0.2, ratio))
+    this.root.style.setProperty('--editor-width', `${clamped * 100}%`)
+    localStorage.setItem(SPLIT_STORAGE_KEY, String(clamped))
+  }
+
+  private installSplitter(workspace: HTMLElement): void {
+    const separator = document.createElement('div')
+    separator.className = 'workspace__splitter'
+    separator.title = 'Перетащите, чтобы изменить ширину редактора'
+    workspace.insertBefore(separator, workspace.lastElementChild)
+
+    let dragging = false
+    separator.addEventListener('pointerdown', event => {
+      dragging = true
+      event.preventDefault()
+      separator.setPointerCapture(event.pointerId)
+      separator.classList.add('is-dragging')
+    })
+    window.addEventListener('pointermove', event => {
+      if (!dragging) return
+      const rect = workspace.getBoundingClientRect()
+      this.applySplit((event.clientX - rect.left) / rect.width)
+    })
+    const stop = () => {
+      if (!dragging) return
+      dragging = false
+      separator.classList.remove('is-dragging')
+    }
+    window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+
+    separator.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      event.preventDefault()
+      const current = Number.parseFloat(localStorage.getItem(SPLIT_STORAGE_KEY) ?? '0.36')
+      this.applySplit(current + (event.key === 'ArrowLeft' ? -0.04 : 0.04))
+    })
   }
 
   private updateCursor(line: number, column: number): void {
@@ -245,7 +302,7 @@ export class App {
       this.toolbar.setStatus('готово', 'ok')
     } catch (error) {
       console.error(error)
-      this.toolbar.setStatus('wasm не загрузился', 'error')
+      this.toolbar.setStatus('эмулятор не загрузился', 'error')
       this.terminal.append(`Ошибка загрузки эмулятора: ${String(error)}\n`)
       return
     }
@@ -268,7 +325,6 @@ export class App {
       (this.route.lab ? findExampleForLab(this.route.lab, this.route.z ?? -1) : undefined) ??
       defaultExample
     this.editor.setText(example.code)
-    this.toolbar.setExample(example.id)
   }
 
   // ─────────────────────────────── маршрут и ограничения ───────────────────────────────
@@ -276,53 +332,27 @@ export class App {
   private applyRouteToUI(): void {
     this.toolbar.setMode(this.archMode)
     this.registers.setArchMode(this.archMode)
-
-    if (this.route.lab !== undefined) {
-      this.setLabInternal(this.route.lab, this.route.z ?? -1)
-    } else {
-      this.setLabInternal(0, -1)
-    }
+    this.view.setArchMode(this.archMode)
+    this.setLabInternal(this.route.lab ?? 0, this.route.z ?? -1)
     this.syncToolbar()
-  }
-
-  private setLab(lab: number, z: number): void {
-    this.setLabInternal(lab, z)
-    this.persistRoute()
-    this.refreshRestrictions()
-
-    // При смене задания подставляем соответствующий пример,
-    // чтобы код сразу соответствовал новым ограничениям.
-    const example = lab > 0 ? findExampleForLab(lab, z) : undefined
-    if (example) {
-      this.editor.setText(example.code)
-      this.toolbar.setExample(example.id)
-      this.reset()
-    }
   }
 
   private setLabInternal(lab: number, z: number): void {
     this.route = { ...this.route, lab: lab || undefined, z: lab ? z : undefined }
     this.labTask = lab > 0 ? getLabTask(lab, z) : undefined
-    this.toolbar.setLab(lab > 0 ? lab : undefined, lab > 0 ? z : undefined)
     this.applyRegisterHighlighting()
   }
 
   private refreshRestrictions(): void {
-    const lab = this.route.lab && this.route.lab > 0 ? this.route.lab : undefined
-    this.restrictions.render(this.labTask, lab ? getLabTitle(lab) : undefined)
+    this.restrictions.render(this.labTask)
     this.applyRegisterHighlighting()
-
-    const link = lab ? getLabLink(lab) : undefined
-    if (link) {
-      this.restrictions.root.querySelector('.restrictions__title')?.setAttribute('title', link)
-    }
   }
 
   private applyRegisterHighlighting(): void {
     const task = this.labTask
     this.editor.setRegisterHighlighting(
-      (register) => (isRegisterAllowed(register, task) ? 'tok-register' : null),
-      (register) => !isRegisterAllowed(register, task),
+      register => (isRegisterAllowed(register, task) ? 'tok-register' : null),
+      register => !isRegisterAllowed(register, task),
     )
   }
 
@@ -330,6 +360,7 @@ export class App {
 
   private async compile(): Promise<boolean> {
     if (this.session.state === 'ASSEMBLING' || this.session.state === 'LINKING') return false
+    this.stopAnimation()
     const source = this.editor.getText()
 
     // 1. Проверка ограничений ДО компиляции
@@ -339,13 +370,11 @@ export class App {
     if (!report.ok) {
       this.markErrors(report.violations.map(v => ({ line: v.line, severity: 'error' as const, message: v.title })))
       this.toolbar.setStatus(`нарушений: ${report.violations.length}`, 'error')
-      this.dock.activate('registers')
       this.machineState = 'restriction-error'
       return false
     }
 
     this.toolbar.setStatus('компиляция…', 'busy')
-    this.dock.setBadge('disasm', null)
     this.terminal.clear()
 
     try {
@@ -372,16 +401,14 @@ export class App {
 
       this.compiled = true
       this.markErrors([])
+      this.restrictions.clearViolations()
       this.machineState = 'loaded'
-      this.dock.setBadge('console', null)
-      this.toolbar.setStatus('собрано', 'ok')
-      this.terminal.append(`Сборка успешна (${this.archMode}).\n`)
+      this.toolbar.setStatus(this.archMode === 'x16' ? 'собрано в .bin' : 'собрано', 'ok')
+      this.terminal.append(this.archMode === 'x16' ? 'Сборка в .bin успешна (запуск недоступен).\n' : 'Сборка успешна.\n')
 
-      if (this.archMode === 'x16') {
-        this.toolbar.setStatus('собрано в .bin', 'ok')
-      } else {
+      if (this.archMode === 'x64') {
+        this.memoryAddress = 0
         await this.refreshViews(true)
-        this.dock.activate('disasm')
       }
       this.syncToolbar()
       return true
@@ -399,9 +426,7 @@ export class App {
     this.compiled = false
     this.machineState = 'assemble-error'
     this.toolbar.setStatus(`${tool}: ошибок ${errors.length || 1}`, 'error')
-    this.dock.setBadge('console', String(errors.length || 1), 'error')
     this.terminal.append(log.replace(/^\s*\n+/, '') + '\n')
-    this.dock.activate('console')
     const first = errors.find(e => e.line > 0)
     if (first) this.editor.revealLine(first.line)
     this.syncToolbar()
@@ -417,7 +442,12 @@ export class App {
     this.editor.setErrors(map)
   }
 
+  /** Запуск до конца (или пауза, если программа уже выполняется) */
   private async runOrPause(): Promise<void> {
+    if (this.running) {
+      this.stop()
+      return
+    }
     if (!this.compiled) {
       const ok = await this.compile()
       if (!ok) return
@@ -426,31 +456,79 @@ export class App {
       this.showNoExecutionMessage()
       return
     }
-    if (this.running) {
-      this.stop()
-      return
-    }
 
+    this.stopAnimation()
     this.running = true
     this.machineState = 'running'
     this.syncToolbar()
     this.toolbar.setStatus('выполнение…', 'busy')
+    this.view.setConsoleStatus('выполнение')
 
     try {
       const exitCode = await this.session.runProgram()
       this.machineState = 'terminated'
-      this.running = false
       this.toolbar.setStatus(exitCode === 0 ? 'завершено' : `код ${exitCode ?? '?'}`, exitCode === 0 ? 'ok' : 'error')
+      this.view.setConsoleStatus(exitCode === 0 ? 'завершено' : `код ${exitCode ?? '?'}`)
       this.terminal.append(`\n${this.session.stopReason()}\n`)
       await this.refreshViews(true)
-      this.dock.activate('registers')
+    } catch (error) {
+      console.error(error)
+      this.toolbar.setStatus('ошибка выполнения', 'error')
     } finally {
       this.running = false
       this.syncToolbar()
     }
   }
 
+  /** Пошаговое выполнение с задержкой — как «Пошагово (анимация)» в diplom_ */
+  private async animate(): Promise<void> {
+    if (this.animating) {
+      this.stopAnimation()
+      return
+    }
+    if (!this.compiled) {
+      const ok = await this.compile()
+      if (!ok) return
+    }
+    if (!canExecute(this.archMode)) {
+      this.showNoExecutionMessage()
+      return
+    }
+
+    this.animating = true
+    this.running = true
+    this.syncToolbar()
+    this.toolbar.setStatus('анимация…', 'busy')
+    this.view.setConsoleStatus('анимация')
+
+    const tick = async () => {
+      if (!this.animating) return
+      if (this.machineState === 'terminated' && this.compiled === false) {
+        this.stopAnimation()
+        return
+      }
+      this.session.step()
+      this.machineState = 'paused'
+      await this.refreshViews(false)
+      this.animationTimer = window.setTimeout(() => void tick(), ANIMATION_DELAY)
+    }
+    void tick()
+  }
+
+  private stopAnimation(): void {
+    if (this.animationTimer !== null) {
+      window.clearTimeout(this.animationTimer)
+      this.animationTimer = null
+    }
+    if (this.animating) {
+      this.animating = false
+      this.running = false
+      this.syncToolbar()
+    }
+  }
+
   private async step(): Promise<void> {
+    this.stopAnimation()
     if (!canExecute(this.archMode)) {
       this.showNoExecutionMessage()
       return
@@ -460,42 +538,41 @@ export class App {
       if (!ok) return
     }
     if (this.machineState === 'terminated') {
-      this.toolbar.setStatus('программа завершена — нажмите «Сброс»', 'error')
+      this.toolbar.setStatus('программа завершена — нажмите «Сбросить»', 'error')
       return
     }
     this.session.step()
-    if (this.running) {
-      this.running = false
-      this.toolbar.setRunning(false)
-    }
+    this.running = false
     this.machineState = 'paused'
     await this.refreshViews(false)
     this.syncToolbar()
   }
 
   private stop(): void {
+    this.stopAnimation()
     this.session.stop()
     if (!this.running) return
     this.running = false
-    this.toolbar.setRunning(false)
     this.toolbar.setStatus('остановлено', 'idle')
     this.machineState = 'paused'
     this.syncToolbar()
   }
 
   private reset(): void {
+    this.stopAnimation()
     this.compiled = false
     this.running = false
     this.machineState = 'idle'
-    this.toolbar.setRunning(false)
     this.toolbar.setStatus('сброшено', 'idle')
+    this.toolbar.setRunning(false)
     this.disassembly.clear()
     this.registers.clear()
+    this.flags.clear()
     this.stack.clear()
     this.memory.clear()
-    this.memoryAddress = 0x402000
+    this.memoryAddress = 0
     this.markErrors([])
-    this.dock.setBadge('console', null)
+    this.view.setConsoleStatus('')
     this.syncToolbar()
   }
 
@@ -503,29 +580,9 @@ export class App {
     this.archMode = mode
     localStorage.setItem(MODE_STORAGE_KEY, mode)
     this.registers.setArchMode(mode)
+    this.view.setArchMode(mode)
     this.reset()
     this.persistRoute()
-    this.syncToolbar()
-  }
-
-  private loadExample(id: string): void {
-    const example = findExample(id)
-    if (!example) return
-    this.editor.setText(example.code)
-    this.reset()
-    this.persistRoute()
-    this.toolbar.setExample(id)
-  }
-
-  private toggleTheme(): void {
-    this.theme = this.theme === 'dark' ? 'light' : 'dark'
-    localStorage.setItem(THEME_STORAGE_KEY, this.theme)
-    this.applyTheme()
-    this.persistRoute()
-  }
-
-  private applyTheme(): void {
-    document.documentElement.dataset.theme = this.theme
     this.syncToolbar()
   }
 
@@ -533,7 +590,7 @@ export class App {
     this.toolbar.setStatus('16-бит: запуск недоступен', 'error')
     this.terminal.clear()
     this.terminal.append(NO_EXECUTION_REASON + '\n')
-    this.dock.activate('console')
+    this.view.setConsoleStatus('16-бит')
   }
 
   private async copyShareLink(): Promise<void> {
@@ -544,7 +601,6 @@ export class App {
       params.set('z', String(this.route.z ?? -1))
     }
     params.set('mode', this.archMode)
-    params.set('theme', this.theme)
     params.set('code', code)
     const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`
     try {
@@ -571,7 +627,7 @@ export class App {
       lab: this.route.lab,
       z: this.route.z,
       mode: this.archMode,
-      theme: this.theme,
+      theme: 'dark',
     })
   }
 
@@ -582,27 +638,24 @@ export class App {
       busy: this.session.state === 'ASSEMBLING' || this.session.state === 'LINKING',
       compiled: this.compiled,
       running: this.running,
+      animating: this.animating,
       canExecute: canExecute(this.archMode),
       mode: this.archMode,
-      lab: this.route.lab,
-      task: this.route.z,
-      exampleId: '',
-      theme: this.theme,
     }
     this.toolbar.update(state)
-    this.toolbar.setRunning(this.running)
   }
 
   private onBlinkState(_state: string): void {
     this.syncToolbar()
   }
 
-  async refreshViews(withDisassembly: boolean): Promise<void> {
+  async refreshViews(withDisassembly: boolean, redrawMemory = false): Promise<void> {
     if (this.archMode !== 'x64') return
 
     const snapshot = this.session.snapshot()
     if (!snapshot) return
     this.registers.update(snapshot)
+    this.flags.update(snapshot.rflags, snapshot.rip)
 
     if (withDisassembly) {
       const lines = this.session.disassembly()
@@ -613,23 +666,16 @@ export class App {
       this.disassembly.highlight(this.session.disassemblyCurrentLine())
     }
 
-    const stackEntries = this.session.readStack(14)
-    const stackBytes = this.session.readMemory(snapshot.rsp, 14 * 8)
+    const stackEntries = this.session.readStack(12)
+    const stackBytes = this.session.readMemory(snapshot.rsp, 12 * 8)
     this.stack.update(snapshot.rsp, stackEntries, stackBytes)
 
-    if (this.memoryAddress !== 0 || this.machineState !== 'idle') {
+    // По умолчанию показываем область памяти вокруг RSP,
+    // пока пользователь не ввёл свой адрес
+    if (this.memoryAddress === 0) this.memoryAddress = snapshot.rsp
+    if (withDisassembly || redrawMemory) {
       const window = this.session.memoryWindow(this.memoryAddress)
-      if (window) {
-        this.memory.update(window.address, window.bytes)
-      }
-    }
-
-    this.lastRip = snapshot.rip
-    void this.lastRip
-
-    if (this.machineState === 'loaded' || this.machineState === 'paused' || this.machineState === 'terminated') {
-      this.dock.activate(this.dock.active ?? 'registers')
+      if (window) this.memory.update(window.address, window.bytes)
     }
   }
-
 }

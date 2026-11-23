@@ -1,6 +1,6 @@
 /**
- * Панель дизассемблера: адрес, байты, инструкция. Текущая строка (RIP)
- * подсвечивается и автоматически прокручивается в видимую область.
+ * Дизассемблер в стиле Insight: адрес, машинный код, инструкция.
+ * Текущая строка (RIP) подсвечивается и удерживается в поле зрения.
  */
 
 import type { DisasmLine } from '../../types'
@@ -20,49 +20,37 @@ export class DisassemblyPanel {
 
     const header = document.createElement('header')
     header.className = 'panel__header'
-    header.innerHTML = '<h2>Дизассемблер</h2>'
-
-    const controls = document.createElement('div')
-    controls.className = 'panel__controls'
+    header.innerHTML = '<h2>Code segment</h2>'
 
     const follow = document.createElement('button')
     follow.type = 'button'
     follow.className = 'chip is-active'
-    follow.textContent = 'Следить за RIP'
+    follow.textContent = 'следовать за IP'
     follow.addEventListener('click', () => {
       this.followRip = !this.followRip
       follow.classList.toggle('is-active', this.followRip)
     })
-    controls.appendChild(follow)
-    header.appendChild(controls)
+    header.appendChild(follow)
 
     this.body = document.createElement('div')
     this.body.className = 'disasm'
     this.body.setAttribute('role', 'list')
 
-    const empty = document.createElement('div')
-    empty.className = 'panel__empty'
-    empty.textContent = 'Скомпилируйте и запустите программу, чтобы увидеть код'
-    this.body.appendChild(empty)
-
     this.root.append(header, this.body)
+    this.clear()
   }
 
-  /** Полная перерисовка списка (при загрузке/смене программы) */
   render(lines: DisasmLine[], currentLine: number): void {
     this.rows = []
     const fragment = document.createDocumentFragment()
 
-    let index = 0
-    for (const line of lines) {
-      if (index >= MAX_ROWS) break
-
+    lines.slice(0, MAX_ROWS).forEach(line => {
       if (line.label) {
-        const row = document.createElement('div')
-        row.className = 'disasm__label'
-        row.textContent = line.label
-        fragment.appendChild(row)
-        continue
+        const label = document.createElement('div')
+        label.className = 'disasm__label'
+        label.textContent = line.label
+        fragment.appendChild(label)
+        return
       }
 
       const row = document.createElement('div')
@@ -75,7 +63,7 @@ export class DisassemblyPanel {
 
       const bytes = document.createElement('span')
       bytes.className = 'disasm__bytes'
-      bytes.textContent = line.bytes.padEnd(20, ' ')
+      bytes.textContent = line.bytes.padEnd(17, ' ')
 
       const text = document.createElement('span')
       text.className = 'disasm__text'
@@ -84,14 +72,13 @@ export class DisassemblyPanel {
       row.append(address, bytes, text)
       fragment.appendChild(row)
       this.rows.push(row)
-      index++
-    }
+    })
 
     this.body.replaceChildren(fragment)
+    this.currentRow = -1
     this.highlight(currentLine)
   }
 
-  /** Только перенос подсветки текущей строки */
   highlight(currentLine: number): void {
     if (this.currentRow === currentLine) return
     this.rows[this.currentRow]?.classList.remove('is-current')
@@ -99,9 +86,8 @@ export class DisassemblyPanel {
     const row = this.rows[currentLine]
     if (!row) return
     row.classList.add('is-current')
-    if (this.followRip) {
-      // jsdom/старые движки не реализуют scrollIntoView
-      if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' })
+    if (this.followRip && typeof row.scrollIntoView === 'function') {
+      row.scrollIntoView({ block: 'nearest' })
     }
   }
 
@@ -110,7 +96,7 @@ export class DisassemblyPanel {
     this.currentRow = -1
     const empty = document.createElement('div')
     empty.className = 'panel__empty'
-    empty.textContent = 'Программа не загружена'
+    empty.textContent = 'нажмите «Скомпилировать»'
     this.body.replaceChildren(empty)
   }
 }
@@ -129,7 +115,10 @@ function colorizeInstruction(text: string): string {
   const rest = parts.slice(2).join('')
 
   const coloredRest = rest
-    .replace(/\b(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|eax|ebx|ecx|edx|esi|edi|ebp|esp|ax|bx|cx|dx|si|di|bp|sp|ah|al|bh|bl|ch|cl|dh|dl|r\d+[dwb]?)\b/gi, '<span class="tok-register-inline">$1</span>')
+    .replace(
+      /\b(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|eax|ebx|ecx|edx|esi|edi|ebp|esp|ax|bx|cx|dx|si|di|bp|sp|ah|al|bh|bl|ch|cl|dh|dl|r\d+[dwb]?)\b/gi,
+      '<span class="tok-register-inline">$1</span>',
+    )
     .replace(/\b(0x[0-9a-f]+|[0-9a-f]+h)\b/gi, '<span class="tok-number-inline">$1</span>')
 
   return `<span class="tok-mnemonic-inline">${mnemonic}</span>${coloredRest}`

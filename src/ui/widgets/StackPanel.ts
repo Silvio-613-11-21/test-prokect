@@ -1,6 +1,6 @@
 /**
- * Панель стека: значения от RSP вверх (по 8 байт, little-endian).
- * Показывает адрес, значение и ASCII-представление байтов.
+ * Стек в стиле Insight: адреса от RSP вверх, значения по 8 байт
+ * и ASCII-колонка, как требует задание.
  */
 
 import type { StackEntry } from '../../types'
@@ -28,7 +28,7 @@ export class StackPanel {
 
     const header = document.createElement('header')
     header.className = 'panel__header'
-    header.innerHTML = '<h2>Стек</h2>'
+    header.innerHTML = '<h2>Stack</h2>'
 
     this.rspLabel = document.createElement('span')
     this.rspLabel.className = 'panel__badge'
@@ -38,15 +38,17 @@ export class StackPanel {
     this.body = document.createElement('div')
     this.body.className = 'stack'
 
-    const empty = document.createElement('div')
-    empty.className = 'panel__empty'
-    empty.textContent = 'Стек пуст: программа не запущена'
-    this.body.appendChild(empty)
-
     this.root.append(header, this.body)
+    this.renderEmpty()
   }
 
-  /** Обновление из сессии: entries — значения по адресам от rsp */
+  private renderEmpty(): void {
+    const empty = document.createElement('div')
+    empty.className = 'panel__empty'
+    empty.textContent = 'нет данных'
+    this.body.replaceChildren(empty)
+  }
+
   update(rsp: number, entries: StackEntry[], rawBytes: Uint8Array | null): void {
     this.rspLabel.textContent = `RSP=${formatHex(BigInt(rsp), 8)}`
     const fragment = document.createDocumentFragment()
@@ -75,7 +77,7 @@ export class StackPanel {
     if (entries.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'panel__empty'
-      empty.textContent = 'Нет данных: запустите отладчик'
+      empty.textContent = 'нет данных'
       fragment.appendChild(empty)
     }
 
@@ -84,13 +86,9 @@ export class StackPanel {
 
   clear(): void {
     this.rspLabel.textContent = 'RSP=--------'
-    const empty = document.createElement('div')
-    empty.className = 'panel__empty'
-    empty.textContent = 'Стек пуст: программа не запущена'
-    this.body.replaceChildren(empty)
+    this.renderEmpty()
   }
 
-  /** Сколько строк показывать */
   setCount(count: number): void {
     this.count = count
   }
