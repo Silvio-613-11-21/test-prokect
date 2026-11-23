@@ -1,0 +1,114 @@
+/* Редактор: слой подсветки под прозрачной textarea */
+
+.code-editor {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--editor-bg);
+  font-family: var(--font-mono);
+  font-size: var(--editor-font-size);
+  line-height: var(--editor-line-height);
+}
+
+.code-editor__gutter {
+  position: relative;
+  z-index: 2;
+  padding: 8px 10px 8px 8px;
+  text-align: right;
+  color: var(--editor-gutter);
+  background: var(--editor-gutter-bg);
+  user-select: none;
+  border-right: 1px solid var(--editor-border);
+  overflow: hidden;
+  will-change: transform;
+}
+
+.code-editor__line-number {
+  position: relative;
+  height: var(--editor-line-height);
+  font-variant-numeric: tabular-nums;
+  transition: color 0.15s ease;
+}
+
+.code-editor__line-number.has-error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.code-editor__line-number.has-error::after {
+  content: '●';
+  position: absolute;
+  right: -8px;
+  font-size: 0.6em;
+  color: var(--danger);
+}
+
+.code-editor__code {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.code-editor__highlight,
+.code-editor__input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 8px 16px 8px 12px;
+  border: 0;
+  font: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 4;
+}
+
+.code-editor__highlight {
+  pointer-events: none;
+  overflow: hidden;
+  color: var(--editor-fg);
+  background: transparent;
+}
+
+.code-editor__highlight code {
+  font: inherit;
+  line-height: inherit;
+}
+
+.code-editor__input {
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--editor-caret);
+  outline: none;
+  overflow-wrap: normal;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.code-editor__input::selection {
+  background: var(--selection-bg);
+  color: transparent;
+}
+
+/* Токены подсветки */
+.tok-comment { color: var(--tok-comment); font-style: italic; }
+.tok-string { color: var(--tok-string); }
+.tok-number { color: var(--tok-number); }
+.tok-mnemonic { color: var(--tok-mnemonic); font-weight: 700; }
+.tok-register { color: var(--tok-register); }
+.tok-register-forbidden { color: var(--tok-forbidden); text-decoration: underline wavy var(--tok-forbidden); }
+.tok-register-allowed { color: var(--tok-register); }
+.tok-label { color: var(--tok-label); }
+.tok-directive { color: var(--tok-directive); }
+.tok-macro-param { color: var(--tok-macro-param); }
+.tok-segment { color: var(--tok-segment); }
+.tok-size { color: var(--tok-size); font-style: italic; }
+.tok-keyword { color: var(--tok-keyword); }
+.tok-symbol { color: var(--tok-symbol); }
+.tok-ident { color: var(--tok-ident); }
